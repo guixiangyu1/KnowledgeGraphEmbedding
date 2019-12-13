@@ -15,17 +15,17 @@ import torch
 
 from torch.utils.data import DataLoader
 
-from model import KGEModel
+from codes.model import KGEModel
 
-from dataloader import TrainDataset
-from dataloader import BidirectionalOneShotIterator
+from codes.dataloader import TrainDataset
+from codes.dataloader import BidirectionalOneShotIterator
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
         description='Training and Testing Knowledge Graph Embedding Models',
         usage='train.py [<args>] [-h | --help]'
     )
-
+    # action 是开关作用；不需要赋值，只要打出来了，就会赋值True
     parser.add_argument('--cuda', action='store_true', help='use GPU')
     
     parser.add_argument('--do_train', action='store_true')
@@ -236,6 +236,10 @@ def main(args):
         kge_model = kge_model.cuda()
     
     if args.do_train:
+        # pytorch一般是用DataLoader 和 Dataset 搭配使用
+        # TrainDataset继承了Dataset类
+        # DataLoader将其组装成batch
+
         # Set training dataloader iterator
         train_dataloader_head = DataLoader(
             TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch'), 
@@ -244,7 +248,10 @@ def main(args):
             num_workers=max(1, args.cpu_num//2),
             collate_fn=TrainDataset.collate_fn
         )
-        
+
+        # DataLoader 类型的数据，在循环yield过程中，不会终止，而是循环往复
+        # 这里，若没有collate_fn, 则取出来的data是batch_size * tuple(pos, neg, weight, mode)形式，
+        # 而加入了collate_fn, 则将pos,neg,weight 按batch长度zip到了一起
         train_dataloader_tail = DataLoader(
             TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch'), 
             batch_size=args.batch_size,
@@ -252,7 +259,8 @@ def main(args):
             num_workers=max(1, args.cpu_num//2),
             collate_fn=TrainDataset.collate_fn
         )
-        
+
+        # 每次交替生成一个
         train_iterator = BidirectionalOneShotIterator(train_dataloader_head, train_dataloader_tail)
         
         # Set training configuration
@@ -295,13 +303,15 @@ def main(args):
     # Set valid dataloader as it would be evaluated during training
     
     if args.do_train:
-        logging.info('learning_rate = %d' % current_learning_rate)
+        # print('learning_rate = %d' % current_learning_rate)
+        logging.info('learning_rate = %f' % current_learning_rate)
+        # print('learning_rate = %d' % current_learning_rate)
 
         training_logs = []
         
         #Training Loop
         for step in range(init_step, args.max_steps):
-            
+            # 这里的step很奇怪，只训练了一个batch的，一般是按epoch计算的，每个epoch训练一个完整的数据集
             log = kge_model.train_step(kge_model, optimizer, train_iterator, args)
             
             training_logs.append(log)

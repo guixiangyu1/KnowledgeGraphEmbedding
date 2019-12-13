@@ -19,16 +19,20 @@ class TrainDataset(Dataset):
         self.negative_sample_size = negative_sample_size
         self.mode = mode
         self.count = self.count_frequency(triples)
+        # true_tail用来记录(h, r) 对应的正确的 t ， 属于diction, tail 记录于 np.array
         self.true_head, self.true_tail = self.get_true_head_and_tail(self.triples)
         
     def __len__(self):
         return self.len
-    
+
+
+    # __getitem__ 就是让实例能跟字典一样取元素: P[idx]
     def __getitem__(self, idx):
         positive_sample = self.triples[idx]
 
         head, relation, tail = positive_sample
 
+        # 将常出现的组合，权重反而降低；稀有的组合，反而权重更高。这种模式是模仿word2vec负采样中的 subsampling weight。
         subsampling_weight = self.count[(head, relation)] + self.count[(tail, -relation-1)]
         subsampling_weight = torch.sqrt(1 / torch.Tensor([subsampling_weight]))
         
@@ -36,7 +40,7 @@ class TrainDataset(Dataset):
         negative_sample_size = 0
 
         while negative_sample_size < self.negative_sample_size:
-            negative_sample = np.random.randint(self.nentity, size=self.negative_sample_size*2)
+            negative_sample = np.random.randint(self.nentity, size=int(self.negative_sample_size/2))
             if self.mode == 'head-batch':
                 mask = np.in1d(
                     negative_sample, 
@@ -53,23 +57,30 @@ class TrainDataset(Dataset):
                 )
             else:
                 raise ValueError('Training batch mode %s not supported' % self.mode)
+            # numpy.array 的性质，A[[True, False]] 输出True对应的元素
             negative_sample = negative_sample[mask]
             negative_sample_list.append(negative_sample)
             negative_sample_size += negative_sample.size
-        
+
+        # np.concatenate() 将negtive_sample_list中的negtive sample array 进行拼接，得到一个完整的array后再裁剪
         negative_sample = np.concatenate(negative_sample_list)[:self.negative_sample_size]
 
         negative_sample = torch.from_numpy(negative_sample)
         
         positive_sample = torch.LongTensor(positive_sample)
+
+        # 我加的，因为torch.index_select()中必须要longTensor
+        negative_sample = negative_sample.long()
             
         return positive_sample, negative_sample, subsampling_weight, self.mode
     
     @staticmethod
     def collate_fn(data):
+        # merges a list of samples to form a mini-batch
         positive_sample = torch.stack([_[0] for _ in data], dim=0)
         negative_sample = torch.stack([_[1] for _ in data], dim=0)
         subsample_weight = torch.cat([_[2] for _ in data], dim=0)
+        # 一个batch中，只有一个mode，因此只取其一
         mode = data[0][3]
         return positive_sample, negative_sample, subsample_weight, mode
     
@@ -134,8 +145,10 @@ class TestDataset(Dataset):
         head, relation, tail = self.triples[idx]
 
         if self.mode == 'head-batch':
+            # 负例生成；filter_bias 是用来对评分进行综合的；对其他正例进行去除，且得分要-1，对负例的得分不做操作；
             tmp = [(0, rand_head) if (rand_head, relation, tail) not in self.triple_set
                    else (-1, head) for rand_head in range(self.nentity)]
+            #将测试的head也标记为0
             tmp[head] = (0, head)
         elif self.mode == 'tail-batch':
             tmp = [(0, rand_tail) if (head, relation, rand_tail) not in self.triple_set

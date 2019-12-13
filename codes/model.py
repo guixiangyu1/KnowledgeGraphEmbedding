@@ -16,7 +16,7 @@ from sklearn.metrics import average_precision_score
 
 from torch.utils.data import DataLoader
 
-from dataloader import TestDataset
+from .dataloader import TestDataset
 
 class KGEModel(nn.Module):
     def __init__(self, model_name, nentity, nrelation, hidden_dim, gamma, 
@@ -27,12 +27,15 @@ class KGEModel(nn.Module):
         self.nrelation = nrelation
         self.hidden_dim = hidden_dim
         self.epsilon = 2.0
-        
+
+        # gamma 的default是12.0
         self.gamma = nn.Parameter(
             torch.Tensor([gamma]), 
             requires_grad=False
         )
-        
+
+
+        # 初始化embedding
         self.embedding_range = nn.Parameter(
             torch.Tensor([(self.gamma.item() + self.epsilon) / hidden_dim]), 
             requires_grad=False
@@ -59,7 +62,7 @@ class KGEModel(nn.Module):
             self.modulus = nn.Parameter(torch.Tensor([[0.5 * self.embedding_range.item()]]))
         
         #Do not forget to modify this line when you add a new model in the "forward" function
-        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', 'pRotatE']:
+        if model_name not in ['TransE', 'DistMult', 'ComplEx', 'RotatE', 'pRotatE', 'OpticalE']:
             raise ValueError('model %s not supported' % model_name)
             
         if model_name == 'RotatE' and (not double_entity_embedding or double_relation_embedding):
@@ -131,18 +134,23 @@ class KGEModel(nn.Module):
                 dim=0, 
                 index=head_part[:, 0]
             ).unsqueeze(1)
+            # unsqueeze(1)在第一个维度处插入维度1: [1,2,3] -> [[1],[2],[3] 3 变成 3*1
+            # head.shape batch_size * 1 * embedding_size_for_entity
             
             relation = torch.index_select(
                 self.relation_embedding,
                 dim=0,
                 index=head_part[:, 1]
             ).unsqueeze(1)
-            
+            # relation.shape batch_size * 1 * relation_size_for_entity
+
+            # view相当于reshape
             tail = torch.index_select(
                 self.entity_embedding, 
                 dim=0, 
                 index=tail_part.view(-1)
             ).view(batch_size, negative_sample_size, -1)
+            # tail_shape:  batch_size * negtive_sample_size * entity_embedding_size
             
         else:
             raise ValueError('mode %s not supported' % mode)
@@ -152,7 +160,8 @@ class KGEModel(nn.Module):
             'DistMult': self.DistMult,
             'ComplEx': self.ComplEx,
             'RotatE': self.RotatE,
-            'pRotatE': self.pRotatE
+            'pRotatE': self.pRotatE,
+            'OpticalE': self.OpticalE
         }
         
         if self.model_name in model_func:
@@ -163,6 +172,7 @@ class KGEModel(nn.Module):
         return score
     
     def TransE(self, head, relation, tail, mode):
+        # transE 用的是一种概率的log likelihood loss模式，而非原文的那种pairwise的距离loss模式
         if mode == 'head-batch':
             score = head + (relation - tail)
         else:
@@ -196,17 +206,19 @@ class KGEModel(nn.Module):
 
         score = score.sum(dim = 2)
         return score
-
+    # head [16,1,40]; relation [16,1,20]; tail [16,2,40]
     def RotatE(self, head, relation, tail, mode):
         pi = 3.14159265358979323846
-        
+
+        #chunk函数是切块用，chunk（tensor，n份，切块的维度），返回tensor的list
         re_head, im_head = torch.chunk(head, 2, dim=2)
         re_tail, im_tail = torch.chunk(tail, 2, dim=2)
-
+        # re_haed, im_head [16,1,20]; re_tail, im_head [16,2,20]
         #Make phases of relations uniformly distributed in [-pi, pi]
 
+        # phase_relation 属于 正负pi
         phase_relation = relation/(self.embedding_range.item()/pi)
-
+        # re_relation, im_relation [16, 1, 20]
         re_relation = torch.cos(phase_relation)
         im_relation = torch.sin(phase_relation)
 
@@ -216,14 +228,19 @@ class KGEModel(nn.Module):
             re_score = re_score - re_head
             im_score = im_score - im_head
         else:
+            # re_score im_score [16,1,20]; re_tail im_tail [16,2,20]
             re_score = re_head * re_relation - im_head * im_relation
             im_score = re_head * im_relation + im_head * re_relation
             re_score = re_score - re_tail
             im_score = im_score - im_tail
-
+        # re_score 会 broadcast 成 [16,2,20]
         score = torch.stack([re_score, im_score], dim = 0)
+        # score [2,16,2,20]
+        #tensor.norm() 求范数；默认是2; 得到的结果往往会删除dim=k的那一维
         score = score.norm(dim = 0)
+        # score [16,2,20]
 
+        # 注意，作者将embedding的每一个维度的距离求和，这个和是1范式的，而上面的距离又是二范式的norm
         score = self.gamma.item() - score.sum(dim = 2)
         return score
 
@@ -246,6 +263,34 @@ class KGEModel(nn.Module):
 
         score = self.gamma.item() - score.sum(dim = 2) * self.modulus
         return score
+
+    def OpticalE(self, head, relation, tail, mode):
+        pi = 3.14159262358979323846
+
+        # re_haed, im_head [16,1,20]; re_tail, im_tail [16,2,20]
+        re_head, im_head = torch.chunk(head, 2, dim=2)
+        re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+
+        phase_relation = relation / (self.embedding_range.item() / pi)
+        # re_relation, im_relation [16, 1, 20]
+        re_relation = torch.cos(phase_relation)
+        im_relation = torch.sin(phase_relation)
+
+        if mode == 'head-batch':
+            re_score = re_relation * re_tail + im_relation * im_tail
+            im_score = re_relation * im_tail - im_relation * re_tail
+            re_score = re_score + re_head
+            im_score = im_score + im_head
+        else:
+            re_score = re_head * re_relation - im_head * im_relation
+            im_score = re_head * im_relation + im_head * re_relation
+            re_score = re_score + re_tail
+            im_score = im_score + im_tail
+
+        score = torch.stack([re_score, im_score], dim=0)
+        score = score.norm(dim=0)
+        score = score.sum(dim=2) - self.gamma.item()
+        return score
     
     @staticmethod
     def train_step(model, optimizer, train_iterator, args):
@@ -253,30 +298,38 @@ class KGEModel(nn.Module):
         A single train step. Apply back-propation and return the loss
         '''
 
+        # pytorch中，启用 batch_normalization 和 dropout
         model.train()
 
         optimizer.zero_grad()
 
+        # 按batch分配
         positive_sample, negative_sample, subsampling_weight, mode = next(train_iterator)
 
         if args.cuda:
             positive_sample = positive_sample.cuda()
             negative_sample = negative_sample.cuda()
             subsampling_weight = subsampling_weight.cuda()
-
+        # 这里数据都是batch了
         negative_score = model((positive_sample, negative_sample), mode=mode)
 
         if args.negative_adversarial_sampling:
             #In self-adversarial sampling, we do not apply back-propagation on the sampling weight
-            negative_score = (F.softmax(negative_score * args.adversarial_temperature, dim = 1).detach() 
+            # detach() 函数起到了阻断backpropogation的作用
+            negative_score = (F.softmax(negative_score * args.adversarial_temperature, dim = 1).detach()
                               * F.logsigmoid(-negative_score)).sum(dim = 1)
         else:
             negative_score = F.logsigmoid(-negative_score).mean(dim = 1)
 
+        # mode = 'single'
         positive_score = model(positive_sample)
 
         positive_score = F.logsigmoid(positive_score).squeeze(dim = 1)
 
+        # 这里的weight和self-adversarial 没有任何联系
+        #只不过是一种求负样本loss平均的策略，那就得参考每个样本的重要性了，也就是 subsampling_weight
+        # 这个weight来源于word2vec的subsampling weight，
+        # 这里是在一个batch中，评估每一个样本的权重
         if args.uni_weight:
             positive_sample_loss = - positive_score.mean()
             negative_sample_loss = - negative_score.mean()
@@ -285,18 +338,18 @@ class KGEModel(nn.Module):
             negative_sample_loss = - (subsampling_weight * negative_score).sum()/subsampling_weight.sum()
 
         loss = (positive_sample_loss + negative_sample_loss)/2
-        
+
         if args.regularization != 0.0:
             #Use L3 regularization for ComplEx and DistMult
             regularization = args.regularization * (
-                model.entity_embedding.norm(p = 3)**3 + 
+                model.entity_embedding.norm(p = 3)**3 +
                 model.relation_embedding.norm(p = 3).norm(p = 3)**3
             )
             loss = loss + regularization
             regularization_log = {'regularization': regularization.item()}
         else:
             regularization_log = {}
-            
+
         loss.backward()
 
         optimizer.step()
@@ -309,13 +362,13 @@ class KGEModel(nn.Module):
         }
 
         return log
-    
+
     @staticmethod
     def test_step(model, test_triples, all_true_triples, args):
         '''
         Evaluate the model on test or valid datasets
         '''
-        
+
         model.eval()
         
         if args.countries:
@@ -337,7 +390,9 @@ class KGEModel(nn.Module):
 
             y_true = np.array(y_true)
 
-            #average_precision_score is the same as auc_pr
+            # average_precision_score is the same as auc_pr
+            # 作者出错了，两者是不同的，完全不同，正如原函数说明里面强调： average precision
+            # is different from computing the area under the precision-recall curve with the trapezoidal rule
             auc_pr = average_precision_score(y_true, y_score)
 
             metrics = {'auc_pr': auc_pr}
@@ -393,7 +448,7 @@ class KGEModel(nn.Module):
 
                         #Explicitly sort all the entities to ensure that there is no test exposure bias
                         argsort = torch.argsort(score, dim = 1, descending=True)
-
+                        # descending=True 降序排列，得分较高的，排序较为靠前; argsort是按照index编号进行的排序过程
                         if mode == 'head-batch':
                             positive_arg = positive_sample[:, 0]
                         elif mode == 'tail-batch':
