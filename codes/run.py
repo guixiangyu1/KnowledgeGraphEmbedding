@@ -340,10 +340,15 @@ def main(args):
                 log_metrics('Training average', step, metrics)
                 training_logs = []
                 
+            # if args.do_valid and step % args.valid_steps == 0:
+            #     logging.info('Evaluating on Valid Dataset...')
+            #     metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args)
+            #     log_metrics('Valid', step, metrics)
+
             if args.do_valid and step % args.valid_steps == 0:
                 logging.info('Evaluating on Valid Dataset...')
-                metrics = kge_model.test_step(kge_model, valid_triples, all_true_triples, args)
-                log_metrics('Valid', step, metrics)
+                metrics = kge_model.test_step(kge_model, test_triples, all_true_triples, args)
+                log_metrics('Test', step, metrics)
         
         save_variable_list = {
             'step': step, 
