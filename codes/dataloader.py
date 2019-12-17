@@ -192,6 +192,7 @@ class BidirectionalOneShotIterator(object):
         '''
         Transform a PyTorch Dataloader into python iterator
         '''
+        # 这个while true用的很精髓，数据会源源不断
         while True:
             for data in dataloader:
                 yield data
